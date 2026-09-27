@@ -1,0 +1,115 @@
+name: Sync discourse
+
+on:
+  push:
+    paths:
+      - '.github/workflows/discourse.yml'
+  workflow_dispatch:
+    inputs:
+      source_image:
+        description: 'source image (e.g. discourse/discourse)'
+        required: true
+        type: string
+        default: 'discourse/discourse'
+      source_tag:
+        description: 'source image tag'
+        required: true
+        type: string
+        default: '2026.9.0-latest'
+      target_name:
+        description: 'target image name'
+        required: false
+        type: string
+        default: 'discourse'
+
+env:
+  NAMESPACE: ${{ vars.NAMESPACE || 'xuxiaoweicomcn' }}
+  SOURCE_IMAGE: ${{ inputs.source_image || 'discourse/discourse' }}
+  SOURCE_TAG: ${{ inputs.source_tag || '2026.9.0-latest' }}
+  TARGET_NAME: ${{ inputs.target_name || 'discourse' }}
+  CRANE_VERSION: v0.22.1
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      platform: ${{ steps.platform.outputs.platform }}
+    steps:
+      - name: install crane ${{ env.CRANE_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: platform
+        id: platform
+        run: |
+          IMAGE="${{ env.SOURCE_IMAGE }}:${{ env.SOURCE_TAG }}"
+          PLATFORM=$(crane manifest "$IMAGE" | jq -rc 'if .manifests then [.manifests[] | select(.platform.architecture != "unknown") | (.platform.os + "/" + .platform.architecture + (if .platform.variant then "/" + .platform.variant else "" end))] else ["linux/amd64"] end')
+          echo "platform=$PLATFORM"
+          echo "platform=$PLATFORM" >> $GITHUB_OUTPUT
+
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.matrix.outputs.platform) }}
+
+    steps:
+      - name: install crane ${{ env.CRANE_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: crane auth login ${{ vars.SYNC_REGISTRY }}
+        run: |
+          echo "${{ secrets.SYNC_REGISTRY_PASSWORD }}" | crane auth login "${{ vars.SYNC_REGISTRY }}" --username "${{ vars.SYNC_REGISTRY_USERNAME }}" --password-stdin
+
+      - name: env
+        run: |
+          IMAGE="${{ env.SOURCE_IMAGE }}:${{ env.SOURCE_TAG }}"
+          TARGET_IMAGE="${{ vars.SYNC_REGISTRY }}/${{ env.NAMESPACE }}/${{ env.TARGET_NAME }}:${{ env.SOURCE_TAG }}"
+
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "TARGET_IMAGE=$TARGET_IMAGE" >> $GITHUB_ENV
+
+      - name: crane copy ${{ matrix.platform }}
+        run: |
+          PLATFORM="${{ matrix.platform }}"
+          SUFFIX="${PLATFORM#linux/}"
+          SUFFIX="${SUFFIX//\//-}"
+          crane copy --platform="$PLATFORM" "$IMAGE" "$TARGET_IMAGE-$SUFFIX"
+
+  merge:
+    needs: [ matrix, build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: install crane ${{ env.CRANE_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: crane auth login ${{ vars.SYNC_REGISTRY }}
+        run: |
+          echo "${{ secrets.SYNC_REGISTRY_PASSWORD }}" | crane auth login "${{ vars.SYNC_REGISTRY }}" --username "${{ vars.SYNC_REGISTRY_USERNAME }}" --password-stdin
+
+      - name: env
+        run: |
+          TARGET_IMAGE="${{ vars.SYNC_REGISTRY }}/${{ env.NAMESPACE }}/${{ env.TARGET_NAME }}:${{ env.SOURCE_TAG }}"
+
+          echo "TARGET_IMAGE=$TARGET_IMAGE" >> $GITHUB_ENV
+
+      - name: crane index append
+        run: |
+          IMAGES=()
+          for platform in $(echo '${{ needs.matrix.outputs.platform }}' | jq -r '.[]'); do
+            SUFFIX="${platform#linux/}"
+            SUFFIX="${SUFFIX//\//-}"
+            IMAGES+=(-m "$TARGET_IMAGE-$SUFFIX")
+          done
+          crane index append "${IMAGES[@]}" -t "$TARGET_IMAGE"
+
+      - name: crane manifest ${{ env.TARGET_IMAGE }}
+        run: |
+          crane manifest "$TARGET_IMAGE" | jq .
