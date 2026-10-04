@@ -35,7 +35,7 @@ on:
         description: 'max build jobs per run, re-run the workflow to sync the rest'
         required: false
         type: number
-        default: 10
+        default: 20
 
 permissions:
   contents: read
@@ -51,7 +51,7 @@ env:
   SOURCE_TAG: ${{ inputs.source_tag || '' }}
   MIN_VERSION: ${{ inputs.min_version || 'v3.24.0' }}
   TARGET_PREFIX: ${{ inputs.target_prefix || 'calico' }}
-  MAX_JOBS: ${{ inputs.max_jobs || 10 }}
+  MAX_JOBS: ${{ inputs.max_jobs || 20 }}
   RELEASE_REPO: projectcalico/calico
   CRANE_VERSION: v0.22.1
 
