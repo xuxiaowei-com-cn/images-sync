@@ -1,0 +1,307 @@
+name: Sync kubernetes
+
+on:
+  push:
+    paths:
+      - '.github/workflows/kubernetes.yml'
+  schedule:
+    # every Sunday at 00:00 UTC, sync newly released kubernetes images automatically
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    inputs:
+      source_images:
+        description: 'source images, space or comma separated (e.g. registry.k8s.io/kube-apiserver)'
+        required: true
+        type: string
+        default: 'registry.k8s.io/kube-apiserver registry.k8s.io/kube-controller-manager registry.k8s.io/kube-proxy registry.k8s.io/kube-scheduler'
+      source_registry:
+        description: 'source registry prefix (empty = use the image name as is)'
+        required: false
+        type: string
+        default: ''
+      source_tag:
+        description: 'explicit source tags, space or comma separated (empty = auto discover stable releases)'
+        required: false
+        type: string
+        default: ''
+      min_version:
+        description: 'only sync stable releases greater than or equal to this version'
+        required: false
+        type: string
+        default: 'v1.24.0'
+      target_prefix:
+        description: 'target image name prefix (empty = keep the source image name)'
+        required: false
+        type: string
+        default: ''
+      max_jobs:
+        description: 'max build jobs per run, re-run the workflow to sync the rest'
+        required: false
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-kubernetes
+  cancel-in-progress: false
+
+env:
+  NAMESPACE: ${{ vars.NAMESPACE || 'xuxiaoweicomcn' }}
+  SOURCE_IMAGES: ${{ inputs.source_images || 'registry.k8s.io/kube-apiserver registry.k8s.io/kube-controller-manager registry.k8s.io/kube-proxy registry.k8s.io/kube-scheduler' }}
+  SOURCE_REGISTRY: ${{ inputs.source_registry || '' }}
+  SOURCE_TAG: ${{ inputs.source_tag || '' }}
+  MIN_VERSION: ${{ inputs.min_version || 'v1.24.0' }}
+  TARGET_PREFIX: ${{ inputs.target_prefix || '' }}
+  MAX_JOBS: ${{ inputs.max_jobs || 20 }}
+  RELEASE_REPO: kubernetes/kubernetes
+  MAX_PAGES: 50
+  CRANE_VERSION: v0.22.1
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.plan.outputs.include }}
+      targets: ${{ steps.plan.outputs.targets }}
+    steps:
+      - name: install crane ${{ env.CRANE_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: crane auth login ${{ vars.SYNC_REGISTRY }}
+        run: |
+          echo "${{ secrets.SYNC_REGISTRY_PASSWORD }}" | crane auth login "${{ vars.SYNC_REGISTRY }}" --username "${{ vars.SYNC_REGISTRY_USERNAME }}" --password-stdin
+
+      - name: plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # ---------------------------------------------------------------
+          # 1. resolve the source tags
+          #    explicit input, or every stable (non pre-release) release of
+          #    kubernetes/kubernetes greater than or equal to MIN_VERSION
+          #    kubernetes/kubernetes already has more than 800 releases, so
+          #    the pagination must run to the end: stopping early would drop
+          #    old but in range patches, and the API orders by publish date,
+          #    not by version
+          # ---------------------------------------------------------------
+          TAGS=()
+          if [ -n "${SOURCE_TAG// /}" ]; then
+            read -r -a TAGS <<< "$(echo "$SOURCE_TAG" | tr ',' ' ')" || true
+          else
+            echo "discovering stable releases of ${RELEASE_REPO} >= ${MIN_VERSION}"
+            AUTH=()
+            if [ -n "${GH_TOKEN:-}" ]; then
+              AUTH=(-H "Authorization: Bearer ${GH_TOKEN}")
+            fi
+            RELEASES=""
+            for page in $(seq 1 "$MAX_PAGES"); do
+              # nine pages for this repository, a single transient failure must
+              # not throw away the whole plan
+              ATTEMPT=0
+              until BODY=$(curl -fsSL "${AUTH[@]}" -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${RELEASE_REPO}/releases?per_page=100&page=${page}"); do
+                ATTEMPT=$((ATTEMPT + 1))
+                if [ "$ATTEMPT" -ge 3 ]; then
+                  echo "cannot list the releases of ${RELEASE_REPO} (page ${page})" >&2
+                  exit 1
+                fi
+                echo "retrying release page ${page}, attempt ${ATTEMPT}" >&2
+                sleep 3
+              done
+              SIZE=$(jq 'length' <<< "$BODY")
+              RELEASES+=$(jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name' <<< "$BODY")$'\n'
+              if [ "$SIZE" -lt 100 ]; then
+                break
+              fi
+              if [ "$page" -eq "$MAX_PAGES" ]; then
+                echo "warning: ${RELEASE_REPO} still has ${SIZE} releases at page ${MAX_PAGES}, older tags are missing" >&2
+              fi
+            done
+            # GA only: keep vX.Y.Z, drop vX.Y.Z-alpha.1 / -beta.0 / -rc.1 and friends
+            read -r -a TAGS <<< "$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$RELEASES" | sort -u -V | awk -v min="$MIN_VERSION" '
+              function ver(v,   a) { gsub(/^v/, "", v); split(v, a, "."); return a[1] * 1000000 + a[2] * 1000 + a[3] }
+              ver($0) >= ver(min)' | tr '\n' ' ')" || true
+          fi
+
+          if [ "${#TAGS[@]}" -eq 0 ]; then
+            echo "include=[]" >> "$GITHUB_OUTPUT"
+            echo "targets=[]" >> "$GITHUB_OUTPUT"
+            echo "no source tag to sync" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "source tags (${#TAGS[@]}): ${TAGS[*]}"
+
+          # ---------------------------------------------------------------
+          # 2. plan one job per image x tag x platform
+          #    a tag is skipped when it is already in the target registry, or
+          #    when the upstream image does not publish that tag
+          #    the platforms have to be read per tag: linux/arm/v7 is still
+          #    published for v1.24.x but was dropped by later releases
+          #    a tag is always planned as a whole, every platform of a tag
+          #    together, otherwise the merged index would end up as an
+          #    incomplete multi-arch image and later runs would skip it
+          # ---------------------------------------------------------------
+          INCLUDE='[]'
+          TARGETS='[]'
+          JOBS=0
+          TRUNCATED=false
+          for image in $(echo "$SOURCE_IMAGES" | tr ',' ' '); do
+            if [ -z "$image" ]; then
+              continue
+            fi
+            FIRST="${image%%/*}"
+            SOURCE="$image"
+            if [ -n "$SOURCE_REGISTRY" ] && [[ "$FIRST" != *.* && "$FIRST" != *:* ]]; then
+              SOURCE="$SOURCE_REGISTRY/$image"
+            fi
+            NAME="${TARGET_PREFIX:+${TARGET_PREFIX}-}${image##*/}"
+            TARGET_REPO="${{ vars.SYNC_REGISTRY }}/${NAMESPACE}/${NAME}"
+
+            for tag in "${TAGS[@]}"; do
+              if crane manifest "${TARGET_REPO}:${tag}" > /dev/null 2>&1; then
+                echo "skip ${image}:${tag} - already in ${TARGET_REPO}"
+                continue
+              fi
+
+              if ! MANIFEST=$(crane manifest "${SOURCE}:${tag}" 2>&1); then
+                if grep -qE 'MANIFEST_UNKNOWN|NAME_UNKNOWN|404' <<< "$MANIFEST"; then
+                  echo "skip ${SOURCE}:${tag} - not published upstream"
+                  continue
+                fi
+                echo "cannot read ${SOURCE}:${tag}: ${MANIFEST}" >&2
+                exit 1
+              fi
+
+              if jq -e '.manifests' <<< "$MANIFEST" > /dev/null; then
+                PLATFORMS=$(jq -rc '[.manifests[] | select((.platform.architecture // "unknown") != "unknown") | (.platform.os + "/" + .platform.architecture + (if .platform.variant then "/" + .platform.variant else "" end))] | unique' <<< "$MANIFEST")
+              else
+                # plain single platform manifest, ask the image config for its platform
+                PLATFORMS=$(crane config "${SOURCE}:${tag}" | jq -rc '[.os + "/" + .architecture + (if (.variant // "") != "" then "/" + .variant else "" end)]')
+              fi
+              COUNT=$(jq 'length' <<< "$PLATFORMS")
+
+              if [ $((JOBS + COUNT)) -gt "$MAX_JOBS" ]; then
+                if [ "$JOBS" -eq 0 ]; then
+                  echo "warning: ${image}:${tag} alone needs ${COUNT} jobs, more than max_jobs=${MAX_JOBS}, syncing it anyway"
+                else
+                  echo "max_jobs=${MAX_JOBS} reached after ${JOBS} jobs, re-run the workflow to sync the remaining tags"
+                  TRUNCATED=true
+                  break 2
+                fi
+              fi
+
+              SUFFIXES=$(jq -r '[.[] | ltrimstr("linux/") | gsub("/"; "-")] | join(" ")' <<< "$PLATFORMS")
+              while IFS= read -r platform; do
+                if [ -z "$platform" ]; then
+                  continue
+                fi
+                suffix="${platform#linux/}"
+                suffix="${suffix//\//-}"
+                INCLUDE=$(jq -c --arg source "$SOURCE" --arg name "$NAME" --arg tag "$tag" --arg platform "$platform" --arg suffix "$suffix" \
+                  '. + [{source: $source, name: $name, tag: $tag, platform: $platform, suffix: $suffix}]' <<< "$INCLUDE")
+              done < <(jq -r '.[]' <<< "$PLATFORMS")
+              TARGETS=$(jq -c --arg source "$SOURCE" --arg name "$NAME" --arg tag "$tag" --arg suffixes "$SUFFIXES" \
+                '. + [{source: $source, name: $name, tag: $tag, suffixes: $suffixes}]' <<< "$TARGETS")
+
+              JOBS=$((JOBS + COUNT))
+              echo "plan ${image}:${tag} [${SUFFIXES// /, }]"
+            done
+          done
+
+          # ---------------------------------------------------------------
+          # 3. publish the plan
+          # ---------------------------------------------------------------
+          echo "include=$(jq -c . <<< "$INCLUDE")" >> "$GITHUB_OUTPUT"
+          echo "targets=$(jq -c . <<< "$TARGETS")" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### kubernetes sync plan"
+            echo ""
+            echo "- stable tags discovered: ${#TAGS[@]}"
+            echo "- build jobs planned: ${JOBS} (limit ${MAX_JOBS})"
+            echo "- truncated, re-run to continue: ${TRUNCATED}"
+            echo ""
+            echo "| target | tag | platforms |"
+            echo "| --- | --- | --- |"
+            jq -r '.[] | "| \(.name) | \(.tag) | \(.suffixes // "") |"' <<< "$TARGETS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: matrix
+    if: needs.matrix.outputs.include != '[]' && needs.matrix.outputs.include != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.matrix.outputs.include) }}
+
+    steps:
+      - name: install crane ${{ env.CRANE_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: crane auth login ${{ vars.SYNC_REGISTRY }}
+        run: |
+          echo "${{ secrets.SYNC_REGISTRY_PASSWORD }}" | crane auth login "${{ vars.SYNC_REGISTRY }}" --username "${{ vars.SYNC_REGISTRY_USERNAME }}" --password-stdin
+
+      - name: env
+        run: |
+          IMAGE="${{ matrix.source }}:${{ matrix.tag }}"
+          TARGET_IMAGE="${{ vars.SYNC_REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.name }}:${{ matrix.tag }}"
+
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "TARGET_IMAGE=$TARGET_IMAGE" >> $GITHUB_ENV
+
+      - name: crane copy ${{ matrix.name }}:${{ matrix.tag }} ${{ matrix.platform }}
+        run: |
+          crane copy --platform="${{ matrix.platform }}" "$IMAGE" "$TARGET_IMAGE-${{ matrix.suffix }}"
+
+  merge:
+    needs: [ matrix, build ]
+    if: needs.matrix.outputs.targets != '[]' && needs.matrix.outputs.targets != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.matrix.outputs.targets) }}
+
+    steps:
+      - name: install crane ${{ env.CRANE_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: crane auth login ${{ vars.SYNC_REGISTRY }}
+        run: |
+          echo "${{ secrets.SYNC_REGISTRY_PASSWORD }}" | crane auth login "${{ vars.SYNC_REGISTRY }}" --username "${{ vars.SYNC_REGISTRY_USERNAME }}" --password-stdin
+
+      - name: env
+        run: |
+          TARGET_IMAGE="${{ vars.SYNC_REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.name }}:${{ matrix.tag }}"
+
+          echo "TARGET_IMAGE=$TARGET_IMAGE" >> $GITHUB_ENV
+
+      - name: crane index append ${{ matrix.name }}:${{ matrix.tag }}
+        run: |
+          # rebuild the index from scratch: a re-run, or a target registry
+          # lookup that failed for an unrelated reason, must never append the
+          # same platform to an index twice
+          crane delete "$TARGET_IMAGE" > /dev/null 2>&1 || true
+
+          IMAGES=()
+          for suffix in ${{ matrix.suffixes }}; do
+            IMAGES+=(-m "$TARGET_IMAGE-$suffix")
+          done
+          crane index append "${IMAGES[@]}" -t "$TARGET_IMAGE"
+
+      - name: crane manifest ${{ env.TARGET_IMAGE }}
+        run: |
+          crane manifest "$TARGET_IMAGE" | jq .
