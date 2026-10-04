@@ -28,7 +28,7 @@ on:
         description: 'only sync stable releases greater than or equal to this version'
         required: false
         type: string
-        default: 'v1.24.0'
+        default: 'v1.33.0'
       target_prefix:
         description: 'target image name prefix (empty = keep the source image name)'
         required: false
@@ -52,7 +52,7 @@ env:
   SOURCE_IMAGES: ${{ inputs.source_images || 'registry.k8s.io/kube-apiserver registry.k8s.io/kube-controller-manager registry.k8s.io/kube-proxy registry.k8s.io/kube-scheduler' }}
   SOURCE_REGISTRY: ${{ inputs.source_registry || '' }}
   SOURCE_TAG: ${{ inputs.source_tag || '' }}
-  MIN_VERSION: ${{ inputs.min_version || 'v1.24.0' }}
+  MIN_VERSION: ${{ inputs.min_version || 'v1.33.0' }}
   TARGET_PREFIX: ${{ inputs.target_prefix || '' }}
   MAX_JOBS: ${{ inputs.max_jobs || 20 }}
   RELEASE_REPO: kubernetes/kubernetes
