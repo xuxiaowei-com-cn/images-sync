@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - '.github/workflows/calico.yml'
+  schedule:
+    # every Sunday at 00:00 UTC, sync newly released calico images automatically
+    - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
       source_images:
@@ -25,7 +28,7 @@ on:
         description: 'only sync stable releases greater than or equal to this version'
         required: false
         type: string
-        default: 'v3.24.0'
+        default: 'v3.27.0'
       target_prefix:
         description: 'target image name prefix'
         required: false
@@ -49,7 +52,7 @@ env:
   SOURCE_IMAGES: ${{ inputs.source_images || 'calico/cni calico/node calico/kube-controllers' }}
   SOURCE_REGISTRY: ${{ inputs.source_registry || '' }}
   SOURCE_TAG: ${{ inputs.source_tag || '' }}
-  MIN_VERSION: ${{ inputs.min_version || 'v3.24.0' }}
+  MIN_VERSION: ${{ inputs.min_version || 'v3.27.0' }}
   TARGET_PREFIX: ${{ inputs.target_prefix || 'calico' }}
   MAX_JOBS: ${{ inputs.max_jobs || 20 }}
   RELEASE_REPO: projectcalico/calico
