@@ -82,7 +82,7 @@ jobs:
       # the source registry is public, no credential is needed to read it
       - name: crane auth login ${{ env.TARGET_REGISTRY }}
         run: |
-          echo "${{ secrets.TARGET_REGISTRY_PASSWORD }}" | crane auth login "${{ env.TARGET_REGISTRY }}" --username "${{ secrets.TARGET_REGISTRY_USERNAME }}" --password-stdin
+          echo "${{ secrets.TARGET_REGISTRY_PASSWORD }}" | crane auth login "${{ env.TARGET_REGISTRY }}" --username "${{ vars.TARGET_REGISTRY_USERNAME }}" --password-stdin
 
       - name: env
         run: |
@@ -110,7 +110,7 @@ jobs:
 
       - name: crane auth login ${{ env.TARGET_REGISTRY }}
         run: |
-          echo "${{ secrets.TARGET_REGISTRY_PASSWORD }}" | crane auth login "${{ env.TARGET_REGISTRY }}" --username "${{ secrets.TARGET_REGISTRY_USERNAME }}" --password-stdin
+          echo "${{ secrets.TARGET_REGISTRY_PASSWORD }}" | crane auth login "${{ env.TARGET_REGISTRY }}" --username "${{ vars.TARGET_REGISTRY_USERNAME }}" --password-stdin
 
       - name: env
         run: |
