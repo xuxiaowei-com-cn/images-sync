@@ -54,19 +54,7 @@ jobs:
           curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
           crane version
 
-      # the source registry may be public or private, log in only when a source
-      # credential is configured
-      - name: crane auth login source registry
-        env:
-          SOURCE_REGISTRY_USERNAME: ${{ secrets.SOURCE_REGISTRY_USERNAME }}
-          SOURCE_REGISTRY_PASSWORD: ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
-        run: |
-          if [ -z "${SOURCE_REGISTRY_USERNAME}" ]; then
-            echo "no source registry credential configured, using an anonymous pull"
-            exit 0
-          fi
-          echo "${SOURCE_REGISTRY_PASSWORD}" | crane auth login "${SOURCE_IMAGE%%/*}" --username "${SOURCE_REGISTRY_USERNAME}" --password-stdin
-
+      # the source registry is public, no credential is needed to read it
       - name: platform
         id: platform
         run: |
@@ -91,17 +79,7 @@ jobs:
           curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
           crane version
 
-      - name: crane auth login source registry
-        env:
-          SOURCE_REGISTRY_USERNAME: ${{ secrets.SOURCE_REGISTRY_USERNAME }}
-          SOURCE_REGISTRY_PASSWORD: ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
-        run: |
-          if [ -z "${SOURCE_REGISTRY_USERNAME}" ]; then
-            echo "no source registry credential configured, using an anonymous pull"
-            exit 0
-          fi
-          echo "${SOURCE_REGISTRY_PASSWORD}" | crane auth login "${SOURCE_IMAGE%%/*}" --username "${SOURCE_REGISTRY_USERNAME}" --password-stdin
-
+      # the source registry is public, no credential is needed to read it
       - name: crane auth login ${{ env.TARGET_REGISTRY }}
         run: |
           echo "${{ secrets.TARGET_REGISTRY_PASSWORD }}" | crane auth login "${{ env.TARGET_REGISTRY }}" --username "${{ secrets.TARGET_REGISTRY_USERNAME }}" --password-stdin
