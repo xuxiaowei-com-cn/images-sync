@@ -1,0 +1,159 @@
+name: Sync hmos command arkui-x android
+
+on:
+  push:
+    paths:
+      - '.github/workflows/hmos-command-arkui-x-android.yml'
+  workflow_dispatch:
+    inputs:
+      source_image:
+        description: 'source image (e.g. registry.cn-qingdao.aliyuncs.com/xuxiaoweicomcn/hmos-command-arkui-x-android)'
+        required: true
+        type: string
+        default: 'registry.cn-qingdao.aliyuncs.com/xuxiaoweicomcn/hmos-command-arkui-x-android'
+      source_tag:
+        description: 'source image tag'
+        required: true
+        type: string
+        default: '26.0.0.851-26.0.0.28-33-36.0.0'
+      target_registry:
+        description: 'target registry (empty = repository variable TARGET_REGISTRY, fallback docker.io)'
+        required: false
+        type: string
+        default: ''
+      target_name:
+        description: 'target image name'
+        required: false
+        type: string
+        default: 'hmos-command-arkui-x-android'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-hmos-command-arkui-x-android
+  cancel-in-progress: false
+
+env:
+  # Docker Hub by default: docker.io/xuxiaoweicomcn/hmos-command-arkui-x-android
+  TARGET_REGISTRY: ${{ inputs.target_registry || vars.TARGET_REGISTRY || 'docker.io' }}
+  NAMESPACE: ${{ vars.NAMESPACE || 'xuxiaoweicomcn' }}
+  SOURCE_IMAGE: ${{ inputs.source_image || 'registry.cn-qingdao.aliyuncs.com/xuxiaoweicomcn/hmos-command-arkui-x-android' }}
+  SOURCE_TAG: ${{ inputs.source_tag || '26.0.0.851-26.0.0.28-33-36.0.0' }}
+  TARGET_NAME: ${{ inputs.target_name || 'hmos-command-arkui-x-android' }}
+  CRANE_VERSION: v0.22.1
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      platform: ${{ steps.platform.outputs.platform }}
+    steps:
+      - name: install crane ${{ env.CRANE_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      # the source registry may be public or private, log in only when a source
+      # credential is configured
+      - name: crane auth login source registry
+        env:
+          SOURCE_REGISTRY_USERNAME: ${{ secrets.SOURCE_REGISTRY_USERNAME }}
+          SOURCE_REGISTRY_PASSWORD: ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
+        run: |
+          if [ -z "${SOURCE_REGISTRY_USERNAME}" ]; then
+            echo "no source registry credential configured, using an anonymous pull"
+            exit 0
+          fi
+          echo "${SOURCE_REGISTRY_PASSWORD}" | crane auth login "${SOURCE_IMAGE%%/*}" --username "${SOURCE_REGISTRY_USERNAME}" --password-stdin
+
+      - name: platform
+        id: platform
+        run: |
+          IMAGE="${{ env.SOURCE_IMAGE }}:${{ env.SOURCE_TAG }}"
+          # an OCI index may carry attestation manifests, they have an unknown
+          # platform and must not be copied as if they were runnable images
+          PLATFORM=$(crane manifest "$IMAGE" | jq -rc 'if .manifests then [.manifests[] | select(.platform.architecture != "unknown") | (.platform.os + "/" + .platform.architecture + (if .platform.variant then "/" + .platform.variant else "" end))] | unique else ["linux/amd64"] end')
+          echo "platform=$PLATFORM"
+          echo "platform=$PLATFORM" >> $GITHUB_OUTPUT
+
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.matrix.outputs.platform) }}
+
+    steps:
+      - name: install crane ${{ env.CRANE_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: crane auth login source registry
+        env:
+          SOURCE_REGISTRY_USERNAME: ${{ secrets.SOURCE_REGISTRY_USERNAME }}
+          SOURCE_REGISTRY_PASSWORD: ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
+        run: |
+          if [ -z "${SOURCE_REGISTRY_USERNAME}" ]; then
+            echo "no source registry credential configured, using an anonymous pull"
+            exit 0
+          fi
+          echo "${SOURCE_REGISTRY_PASSWORD}" | crane auth login "${SOURCE_IMAGE%%/*}" --username "${SOURCE_REGISTRY_USERNAME}" --password-stdin
+
+      - name: crane auth login ${{ env.TARGET_REGISTRY }}
+        run: |
+          echo "${{ secrets.TARGET_REGISTRY_PASSWORD }}" | crane auth login "${{ env.TARGET_REGISTRY }}" --username "${{ secrets.TARGET_REGISTRY_USERNAME }}" --password-stdin
+
+      - name: env
+        run: |
+          IMAGE="${{ env.SOURCE_IMAGE }}:${{ env.SOURCE_TAG }}"
+          TARGET_IMAGE="${{ env.TARGET_REGISTRY }}/${{ env.NAMESPACE }}/${{ env.TARGET_NAME }}:${{ env.SOURCE_TAG }}"
+
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "TARGET_IMAGE=$TARGET_IMAGE" >> $GITHUB_ENV
+
+      - name: crane copy ${{ matrix.platform }}
+        run: |
+          PLATFORM="${{ matrix.platform }}"
+          SUFFIX="${PLATFORM#linux/}"
+          SUFFIX="${SUFFIX//\//-}"
+          crane copy --platform="$PLATFORM" "$IMAGE" "$TARGET_IMAGE-$SUFFIX"
+
+  merge:
+    needs: [ matrix, build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: install crane ${{ env.CRANE_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${{ env.CRANE_VERSION }}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: crane auth login ${{ env.TARGET_REGISTRY }}
+        run: |
+          echo "${{ secrets.TARGET_REGISTRY_PASSWORD }}" | crane auth login "${{ env.TARGET_REGISTRY }}" --username "${{ secrets.TARGET_REGISTRY_USERNAME }}" --password-stdin
+
+      - name: env
+        run: |
+          TARGET_IMAGE="${{ env.TARGET_REGISTRY }}/${{ env.NAMESPACE }}/${{ env.TARGET_NAME }}:${{ env.SOURCE_TAG }}"
+
+          echo "TARGET_IMAGE=$TARGET_IMAGE" >> $GITHUB_ENV
+
+      - name: crane index append
+        run: |
+          # rebuild the index from scratch so a re-run never appends the same
+          # platform twice
+          crane delete "$TARGET_IMAGE" > /dev/null 2>&1 || true
+
+          IMAGES=()
+          for platform in $(echo '${{ needs.matrix.outputs.platform }}' | jq -r '.[]'); do
+            SUFFIX="${platform#linux/}"
+            SUFFIX="${SUFFIX//\//-}"
+            IMAGES+=(-m "$TARGET_IMAGE-$SUFFIX")
+          done
+          crane index append "${IMAGES[@]}" -t "$TARGET_IMAGE"
+
+      - name: crane manifest ${{ env.TARGET_IMAGE }}
+        run: |
+          crane manifest "$TARGET_IMAGE" | jq .
