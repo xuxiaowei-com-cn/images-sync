@@ -25,7 +25,7 @@ on:
 env:
   NAMESPACE: ${{ vars.NAMESPACE || 'xuxiaoweicomcn' }}
   SOURCE_IMAGE: ${{ inputs.source_image || 'discourse/discourse' }}
-  SOURCE_TAG: ${{ inputs.source_tag || '2026.9.0-latest' }}
+  SOURCE_TAG: ${{ inputs.source_tag || '2026.10.0-latest' }}
   TARGET_NAME: ${{ inputs.target_name || 'discourse' }}
   CRANE_VERSION: v0.22.1
 
