@@ -15,7 +15,7 @@ on:
         description: 'source image tag'
         required: true
         type: string
-        default: '2026.9.0-latest'
+        default: '2026.10.0-latest'
       target_name:
         description: 'target image name'
         required: false
