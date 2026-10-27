@@ -15,7 +15,7 @@ on:
         description: 'source image tag'
         required: true
         type: string
-        default: '2026.10.0-latest'
+        default: '2026.11.0-latest'
       target_name:
         description: 'target image name'
         required: false
@@ -25,7 +25,7 @@ on:
 env:
   NAMESPACE: ${{ vars.NAMESPACE || 'xuxiaoweicomcn' }}
   SOURCE_IMAGE: ${{ inputs.source_image || 'discourse/discourse' }}
-  SOURCE_TAG: ${{ inputs.source_tag || '2026.10.0-latest' }}
+  SOURCE_TAG: ${{ inputs.source_tag || '2026.11.0-latest' }}
   TARGET_NAME: ${{ inputs.target_name || 'discourse' }}
   CRANE_VERSION: v0.22.1
 
