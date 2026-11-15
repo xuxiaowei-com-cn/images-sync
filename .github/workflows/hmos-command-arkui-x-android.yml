@@ -15,7 +15,7 @@ on:
         description: 'source image tag'
         required: true
         type: string
-        default: '26.0.0.851-26.0.0.28-33-36.0.0'
+        default: '26.0.1.290-26.0.1.110-36-36.0.0'
       target_registry:
         description: 'target registry (empty = repository variable TARGET_REGISTRY, fallback docker.io)'
         required: false
@@ -39,7 +39,7 @@ env:
   TARGET_REGISTRY: ${{ inputs.target_registry || vars.TARGET_REGISTRY || 'docker.io' }}
   NAMESPACE: ${{ vars.NAMESPACE || 'xuxiaoweicomcn' }}
   SOURCE_IMAGE: ${{ inputs.source_image || 'registry.cn-qingdao.aliyuncs.com/xuxiaoweicomcn/hmos-command-arkui-x-android' }}
-  SOURCE_TAG: ${{ inputs.source_tag || '26.0.0.851-26.0.0.28-33-36.0.0' }}
+  SOURCE_TAG: ${{ inputs.source_tag || '26.0.1.290-26.0.1.110-36-36.0.0' }}
   TARGET_NAME: ${{ inputs.target_name || 'hmos-command-arkui-x-android' }}
   CRANE_VERSION: v0.22.1
 
