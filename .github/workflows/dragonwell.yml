@@ -15,7 +15,7 @@ on:
         description: 'source image tag'
         required: true
         type: string
-        default: '25.0.5.0.5.8-extended-ga-ubuntu'
+        default: '25.0.5.0.5.8-standard-ga-anolis'
       target_name:
         description: 'target image name'
         required: false
@@ -32,7 +32,7 @@ concurrency:
 env:
   NAMESPACE: ${{ vars.NAMESPACE || 'xuxiaoweicomcn' }}
   SOURCE_IMAGE: ${{ inputs.source_image || 'alibabadragonwell/dragonwell' }}
-  SOURCE_TAG: ${{ inputs.source_tag || '25.0.5.0.5.8-extended-ga-ubuntu' }}
+  SOURCE_TAG: ${{ inputs.source_tag || '25.0.5.0.5.8-standard-ga-anolis' }}
   TARGET_NAME: ${{ inputs.target_name || 'dragonwell' }}
   CRANE_VERSION: v0.22.1
 
